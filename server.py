@@ -5,14 +5,24 @@
 할 일은 이 파일 옆의 todos.json에 저장되어, 서버를 다시 켜도 남아 있습니다.
 서버 이름, 함수 이름, 독스트링은 모델이 읽는 정보입니다. 분명하게 적으세요.
 
-실행(Inspector 열기): uv run mcp dev server.py
-기능 목록 점검:       uv run python list_features.py server.py
+실행 방법 두 가지
+  로컬(stdio):   uv run python server.py
+  원격(HTTP):    uv run python server.py --http            (기본 주소 http://127.0.0.1:8000/mcp)
+                 uv run python server.py --http --port 9000
+
+Inspector 열기:        uv run mcp dev server.py
+기능 목록 점검(stdio): uv run python list_features.py server.py
+원격 서버 점검(HTTP):  uv run python call_remote.py
 """
 
+import argparse
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
+
+from mcp.types import ToolAnnotations
+from pydantic import Field
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError  # 예상한 실패를 모델에게 알릴 때 사용
@@ -52,6 +62,11 @@ def next_id(todos: list[dict]) -> int:
 #   - 독스트링: 모델이 언제 이 도구를 쓸지 알 수 있게 한 문장으로
 #   - 각 Tool은 "load_todos() → 수정 → save_todos()" 순서로 동작합니다
 #   - 예상한 실패는 raise ToolError("무엇이 문제인지") 로 알려 주세요 (ValueError는 메시지가 모델에 전달되지 않습니다)
+#     실패 메시지에는 해결 방법도 함께 적습니다. 예: "7번 할 일이 없습니다. list_todos로 번호를 먼저 확인해 주세요."
+#   - 입력값마다 Annotated[타입, Field(description="...")]로 설명을 붙이면 모델이 인자를 더 정확히 채웁니다
+#   - annotations는 도구의 성격을 앱에 알리는 힌트입니다 (서버 동작을 막아 주지는 않음)
+#       읽기만 하는 도구: @mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+#       되돌릴 수 없는 도구(delete_todo): @mcp.tool(annotations=ToolAnnotations(destructive_hint=True))
 #
 #   1) add_todo(title: str) -> dict          새 할 일을 만들어 돌려준다.   실패: 제목이 비었거나 공백뿐
 #   2) list_todos(status: Literal["all", "open", "done"] = "all") -> list[dict]
@@ -63,11 +78,13 @@ def next_id(todos: list[dict]) -> int:
 
 
 @mcp.tool()
-def add_todo(title: str) -> dict:
+def add_todo(
+    title: Annotated[str, Field(description="할 일 내용 한 줄. 예: 우유 사기")],
+) -> dict:
     """할 일을 하나 추가한다. 만든 할 일(id 포함)을 돌려준다."""
     title = title.strip()
     if not title:
-        raise ToolError("title은 비어 있을 수 없습니다.")
+        raise ToolError("title은 비어 있을 수 없습니다. 할 일 내용을 한 줄로 적어 주세요.")
     todos = load_todos()
     todo = {
         "id": next_id(todos),
@@ -80,8 +97,13 @@ def add_todo(title: str) -> dict:
     return todo
 
 
-@mcp.tool()
-def list_todos(status: Literal["all", "open", "done"] = "all") -> list[dict]:
+@mcp.tool(annotations=ToolAnnotations(read_only_hint=True))
+def list_todos(
+    status: Annotated[
+        Literal["all", "open", "done"],
+        Field(description="all: 전체, open: 아직 안 끝낸 것, done: 완료한 것"),
+    ] = "all",
+) -> list[dict]:
     """할 일 목록을 돌려준다. status로 전체(all), 남은 것(open), 완료한 것(done)을 고른다."""
     todos = load_todos()
     if status == "open":
@@ -92,6 +114,9 @@ def list_todos(status: Literal["all", "open", "done"] = "all") -> list[dict]:
 
 
 # TODO 2-3 ~ 2-5: complete_todo, update_todo, delete_todo 를 위와 같은 방식으로 추가하세요.
+#   - todo_id 인자에도 Field(description="... (add_todo나 list_todos 결과의 id)")를 붙이세요
+#   - 없는 id면 ToolError(f"{todo_id}번 할 일이 없습니다. list_todos로 번호를 먼저 확인해 주세요.")
+#   - delete_todo에는 annotations=ToolAnnotations(destructive_hint=True)를 붙이세요
 
 
 # ── Resource: 읽기 전용 데이터 ──────────────────────────────────────────────
@@ -116,5 +141,20 @@ def list_todos(status: Literal["all", "open", "done"] = "all") -> list[dict]:
 #     return "..."
 
 
+# ── 실행 방식 선택 ───────────────────────────────────────────────────────────
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--http", action="store_true", help="stdio 대신 Streamable HTTP로 실행")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=8000)
+    args = parser.parse_args()
+    if args.http:
+        mcp.run("streamable-http", host=args.host, port=args.port)
+    else:
+        mcp.run()
+
+
 if __name__ == "__main__":
-    mcp.run()
+    main()
